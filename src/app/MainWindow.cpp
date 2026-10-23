@@ -1,0 +1,25 @@
+#include "MainWindow.h"
+#include "../core/AppController.h"
+#include <QLabel>
+#include <QPushButton>
+#include <QTextEdit>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QWidget>
+#include <QMessageBox>
+#include <QTabWidget>
+#include <QStatusBar>
+#include <QGroupBox>
+namespace steamdpi {
+MainWindow::MainWindow(QWidget* parent):QMainWindow(parent),controller_(new AppController(this)){
+ setWindowTitle("SteamDPI — Network Diagnostics");resize(760,560);auto root=new QWidget(this);auto layout=new QVBoxLayout(root);
+ auto heading=new QLabel("Steam Connectivity Diagnostics",root);QFont f=heading->font();f.setPointSize(16);f.setBold(true);heading->setFont(f);layout->addWidget(heading);
+ status_=new QLabel("Network Status: Ready",root);layout->addWidget(status_);layout->addWidget(new QLabel("Engine: NOT_IMPLEMENTED — DPI bypass is unavailable in this phase.",root));
+ auto buttons=new QHBoxLayout;run_=new QPushButton("Run Diagnostics",root);cancel_=new QPushButton("Cancel",root);auto dpiStart=new QPushButton("DPI Start",root);auto dpiStop=new QPushButton("DPI Stop",root);auto exportButton=new QPushButton("Export Report",root);dpiStart->setEnabled(false);dpiStop->setEnabled(false);dpiStart->setToolTip("Not implemented");dpiStop->setToolTip("Not implemented");buttons->addWidget(run_);buttons->addWidget(cancel_);buttons->addWidget(exportButton);buttons->addStretch();buttons->addWidget(dpiStart);buttons->addWidget(dpiStop);layout->addLayout(buttons);
+ auto tabs=new QTabWidget(root);dns_=new QTextEdit(tabs);tcp_=new QTextEdit(tabs);tls_=new QTextEdit(tabs);log_=new QTextEdit(tabs);for(auto* view:{dns_,tcp_,tls_,log_})view->setReadOnly(true);tabs->addTab(dns_,"DNS Results");tabs->addTab(tcp_,"TCP Results");tabs->addTab(tls_,"TLS Results");tabs->addTab(log_,"Diagnostic Log");layout->addWidget(tabs);setCentralWidget(root);
+ connect(run_,&QPushButton::clicked,controller_,&AppController::runDiagnostics);connect(cancel_,&QPushButton::clicked,controller_,&AppController::cancelDiagnostics);connect(exportButton,&QPushButton::clicked,controller_,&AppController::exportReport);
+ auto* observation=new QGroupBox("Packet Observation — read-only metadata and packet validation (OFF until started)",root);auto* observationLayout=new QVBoxLayout(observation);captureStatus_=new QLabel("Capture status: Stopped",observation);captureMetrics_=new QLabel("Verified Steam flows: 0 | TCP: 0 | UDP: 0 | IPv4: 0 | IPv6: 0 | Errors: 0 | Dropped monitoring events: 0",observation);captureAttribution_=new QLabel("steam.exe: 0 | steamwebhelper.exe: 0 | Unknown/other/ambiguous: 0",observation);networkMetrics_=new QLabel("NETWORK sniff: stopped; no packets retained",observation);captureStart_=new QPushButton("Start Read-only Observation",observation);captureStop_=new QPushButton("Stop Observation",observation);captureStop_->setEnabled(false);captureStart_->setToolTip("Starts FLOW/SOCKET metadata and read-only NETWORK SNIFF. No packets are blocked or reinjected.");auto* captureButtons=new QHBoxLayout;captureButtons->addWidget(captureStart_);captureButtons->addWidget(captureStop_);captureButtons->addStretch();observationLayout->addWidget(captureStatus_);observationLayout->addWidget(captureMetrics_);observationLayout->addWidget(captureAttribution_);observationLayout->addWidget(networkMetrics_);observationLayout->addLayout(captureButtons);layout->addWidget(observation);
+ connect(captureStart_,&QPushButton::clicked,controller_,&AppController::startCapture);connect(captureStop_,&QPushButton::clicked,controller_,&AppController::stopCapture);connect(controller_,&AppController::captureSnapshotChanged,this,[this](const QString&status,qulonglong flows,qulonglong steamExe,qulonglong webHelper,qulonglong unknown,qulonglong tcp,qulonglong udp,qulonglong ipv4,qulonglong ipv6,qulonglong errors,qulonglong dropped,const QString&network){captureStatus_->setText("Capture status: "+status);captureMetrics_->setText(QString("Verified Steam flows: %1 | TCP: %2 | UDP: %3 | IPv4: %4 | IPv6: %5 | Observation errors: %6 | Dropped monitoring events: %7").arg(flows).arg(tcp).arg(udp).arg(ipv4).arg(ipv6).arg(errors).arg(dropped));captureAttribution_->setText(QString("steam.exe: %1 | steamwebhelper.exe: %2 | Unknown/other/ambiguous: %3").arg(steamExe).arg(webHelper).arg(unknown));networkMetrics_->setText(network);const bool capturing=status.contains("observation active");const bool starting=status.startsWith("Starting");captureStart_->setEnabled(!capturing&&!starting);captureStop_->setEnabled(capturing);});
+ connect(controller_,&AppController::logMessage,this,[this](const QString&s){log_->append(s);if(s.contains(" / DNS ["))dns_->append(s);else if(s.contains(" / TCP ["))tcp_->append(s);else if(s.contains(" / TLS ["))tls_->append(s);});connect(controller_,&AppController::networkStatus,this,[this](const QString&s){status_->setText("Network Status: "+s);});connect(controller_,&AppController::runningChanged,this,[this](bool b){run_->setEnabled(!b);cancel_->setEnabled(b);});cancel_->setEnabled(false);connect(controller_,&AppController::resultMessage,this,[this](const QString&s){statusBar()->showMessage(s,10000);});
+}
+}

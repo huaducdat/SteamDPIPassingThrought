@@ -1,0 +1,26 @@
+#include "AppController.h"
+#include "ReportSerializer.h"
+#include "../network/SteamTargets.h"
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMetaObject>
+#include <QStandardPaths>
+#include <windows.h>
+namespace steamdpi {
+AppController::AppController(QObject* p):QObject(p){QString error;auto path=QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)+"/config.json";QDir().mkpath(QFileInfo(path).path());if(!loadConfig(path,config_,error)){emit logMessage("Configuration rejected: "+error+". Defaults are active.");config_=AppConfig{};}else if(!QFile::exists(path)){saveDefaultConfig(path,error);}capture_=std::make_unique<CaptureController>();capture_->setSnapshotCallback([this](const CaptureSnapshot&s){const auto&m=s.metrics;const QString network=QString("NETWORK sniff: %1 packets, %2 parsed (IPv4 %3 / IPv6 %4), %5 invalid [checksum %6, truncated %7, unsupported %8, length %9, other %10]; Steam matched %11, unmatched %12, ambiguous %13. Unmatched: no flow %14, protocol %15, ports %16 (local %17 / remote %18), address %19 (local %20 / remote %21), direction %22, pre-flow %23, expired %24, unverified identity %25. Pre-parser filtered %26; queues: NETWORK %27/%28 high-water %29, correlation high-water %30, drops %31; capture max %32 us, parse max %33 us").arg(m.networkPacketsObserved).arg(m.networkPacketsParsed).arg(m.networkIpv4Packets).arg(m.networkIpv6Packets).arg(m.networkPacketsRejected).arg(m.networkRejectedChecksum).arg(m.networkRejectedTruncated).arg(m.networkRejectedUnsupported).arg(m.networkRejectedLength).arg(m.networkRejectedOther).arg(m.networkPacketsMatchedSteam).arg(m.networkPacketsUnmatched).arg(m.networkPacketsAmbiguous).arg(m.networkNoCorrespondingFlow).arg(m.networkProtocolMismatch).arg(m.networkPortMismatch).arg(m.networkLocalPortMismatch).arg(m.networkRemotePortMismatch).arg(m.networkAddressMismatch).arg(m.networkLocalAddressMismatch).arg(m.networkRemoteAddressMismatch).arg(m.networkDirectionMismatch).arg(m.networkBeforeFlowWindow).arg(m.networkExpiredFlow).arg(m.networkUnverifiedIdentity).arg(m.networkPacketsFilteredBeforeParser).arg(m.networkEventsEnqueued).arg(m.networkEventsDequeued).arg(m.networkQueueHighWater).arg(m.networkCorrelationQueueHighWater).arg(m.networkCorrelationQueueDrops).arg(m.captureLatencyMaxNs/1000).arg(m.parseLatencyMaxNs/1000);emit captureSnapshotChanged(QString::fromStdString(s.status),m.steamFlowsObserved,m.steamExeFlows,m.steamWebHelperFlows,m.unknownOrAmbiguousFlows,m.tcpFlows,m.udpFlows,m.ipv4Flows,m.ipv6Flows,m.observationErrors,m.droppedMonitorEvents,network);});emit networkStatus("Ready for diagnostics");}
+AppController::~AppController(){if(captureStartWorker_.joinable())captureStartWorker_.join();if(capture_)capture_->stop();cancel_=true;if(worker_.joinable())worker_.join();}
+void AppController::runDiagnostics(){if(running_.exchange(true))return;if(worker_.joinable())worker_.join();cancel_=false;report_={};emit runningChanged(true);emit logMessage("Diagnostic run started; engine state: NOT_IMPLEMENTED");emit networkStatus("Checking selected Steam endpoints");
+ std::vector<std::string> hosts;for(const auto&t:steamTargets())hosts.emplace_back(t.host);
+worker_=std::thread([this,hosts]{DiagnosticService service;auto report=service.run(hosts,config_.timeoutMs,config_.maxConcurrentProbes,cancel_,[this](const ProbeResult&r){QString s=QString::fromStdString("["+std::to_string(r.checkedAtUnixMs)+"] "+r.host+" / "+r.stage+" ["+probeStatusName(r.status)+"]: "+r.detail+" ("+std::to_string(r.latencyMs)+" ms)");QMetaObject::invokeMethod(this,[this,s]{emit logMessage(s);},Qt::QueuedConnection);});QMetaObject::invokeMethod(this,[this,report=std::move(report)]() mutable {report_=std::move(report);running_=false;emit runningChanged(false);emit networkStatus(cancel_?"Cancelled":"Diagnostics complete");emit resultMessage(QString("Completed %1 probe results. A timeout alone does not establish DPI interference.").arg(report_.results.size()));},Qt::QueuedConnection);});
+}
+void AppController::cancelDiagnostics(){if(running_){cancel_=true;emit logMessage("Cancellation requested");}}
+void AppController::exportReport(){QString path=QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)+"/SteamDPI-report-"+QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss")+".json";QFile f(path);if(f.open(QIODevice::WriteOnly)){f.write(serializeReport(report_));emit logMessage("Report exported to "+path);}else emit logMessage("Report export failed: "+f.errorString());}
+void AppController::startCapture(){if(captureStartPending_.exchange(true))return;if(captureStartWorker_.joinable())captureStartWorker_.join();emit captureSnapshotChanged("Starting read-only WinDivert observation",0,0,0,0,0,0,0,0,0,0,"NETWORK sniff: waiting");captureStartWorker_=std::thread([this]{SetThreadDescription(GetCurrentThread(),L"SteamDPI Capture Start Worker");std::string error;if(!capture_->start(error)){const auto message=QString::fromStdString(error);emit logMessage("Packet observation did not start: "+message);emit captureSnapshotChanged(message,0,0,0,0,0,0,0,0,1,0,"NETWORK sniff unavailable");}captureStartPending_=false;});}
+void AppController::stopCapture(){capture_->stop();}
+}
